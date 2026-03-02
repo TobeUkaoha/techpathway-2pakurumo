@@ -1,59 +1,277 @@
-# Overview
-This repository contains a React frontend, and an Express backend that the frontend connects to.
+# TechPathway DevOps Deployment
 
-# Objective
-Deploy the frontend and backend to somewhere publicly accessible over the internet. The AWS Free Tier should be more than sufficient to run this project, but you may use any platform and tooling you'd like for your solution.
+> Full-Stack deployment of a React + Express app using Jenkins, Docker, AWS ECS, ECR, and Terraform.
 
-Fork this repo as a base. You may change any code in this repository to suit the infrastructure you build in this code challenge.
+---
 
-# Submission
-1. A github repo that has been forked from this repo with all your code.
-2. Modify this README file with instructions for:
-* Any tools needed to deploy your infrastructure
-* All the steps needed to repeat your deployment process
-* URLs to the your deployed frontend.
+## Architecture Overview
 
-# Evaluation
-You will be evaluated on the ease to replicate your infrastructure. This is a combination of quality of the instructions, as well as any scripts to automate the overall setup process.
-
-# Setup your environment
-Install nodejs. Binaries and installers can be found on nodejs.org.
-https://nodejs.org/en/download/
-
-For macOS or Linux, Nodejs can usually be found in your preferred package manager.
-https://nodejs.org/en/download/package-manager/
-
-Depending on the Linux distribution, the Node Package Manager `npm` may need to be installed separately.
-
-# Running the project
-The backend and the frontend will need to run on separate processes. The backend should be started first.
 ```
-cd backend
-npm ci
-npm start
+Internet
+   │
+   ▼
+[Application Load Balancer]  ← public, port 80
+   │               │
+   │ /             │ /api/*
+   ▼               ▼
+[Frontend ECS]  [Backend ECS]   ← private subnets, Fargate
+(React/Nginx)   (Express/Node)
+   │               │
+   └───────────────┘
+         ▼
+   [ECR Repositories]
+   [CloudWatch Logs]
 ```
-The backend should response to a GET request on `localhost:8080`.
 
-With the backend started, the frontend can be started.
+**Traffic flow:**
+- `http://<ALB_DNS>/` → Frontend React app (Nginx)
+- `http://<ALB_DNS>/api/*` → Backend Express API
+- CORS is handled automatically — frontend and backend share the same ALB domain
+
+---
+
+## AWS Resources
+
+### Jenkins Server (manual EC2)
+| Resource | Details |
+|---|---|
+| EC2 Instance | `t3.medium`, Amazon Linux 2023 or Ubuntu 22.04 |
+| Security Group | Port 8080 (Jenkins UI), Port 22 (SSH) |
+| IAM Role | `techpathway-jenkins-role` — ECR push + ECS update permissions |
+| EIP | Static public IP for Jenkins access |
+
+### Terraform-managed Infrastructure
+| Resource | Purpose |
+|---|---|
+| VPC | Isolated network `10.0.0.0/16` |
+| Public Subnets (×2) | ALB + NAT Gateway |
+| Private Subnets (×2) | ECS Fargate tasks |
+| Internet Gateway | Public internet access |
+| NAT Gateway | Outbound internet for private subnets |
+| ALB | Single public entry point, path-based routing |
+| ECS Cluster | Fargate cluster with Container Insights |
+| ECS Task Definitions | Frontend + Backend task specs |
+| ECS Services | Self-healing task management |
+| ECR Repositories | `techpathway-frontend`, `techpathway-backend` |
+| CloudWatch Log Groups | `/ecs/techpathway/frontend`, `/ecs/techpathway/backend` |
+| IAM Roles | Task execution role, task runtime role, Jenkins role |
+| Security Groups | ALB, frontend tasks, backend tasks, Jenkins |
+
+---
+
+## Quick Start
+
+### 1. Prerequisites
+
+- AWS account with admin access
+- Terraform ≥ 1.5
+- AWS CLI v2 configured (`aws configure`)
+- Docker
+- Git
+
+### 2. Clone the repository
+
+```bash
+git clone https://github.com/pakurumo/techpathway-2
+cd techpathway-2
 ```
-cd frontend
-npm ci
-npm start
+
+Copy the DevOps files from this repo into the cloned project:
+```bash
+cp -r /path/to/devops-files/* .
 ```
-The frontend can be accessed at `localhost:3000`. If the frontend successfully connects to the backend, a message saying "SUCCESS" followed by a guid should be displayed on the screen.  If the connection failed, an error message will be displayed on the screen.
 
-# Configuration
-The frontend has a configuration file at `frontend/src/config.js` that defines the URL to call the backend. This URL is used on `frontend/src/App.js#12`, where the front end will make the GET call during the initial load of the page.
+### 3. Run Terraform
 
-The backend has a configuration file at `backend/config.js` that defines the host that the frontend will be calling from. This URL is used in the `Access-Control-Allow-Origin` CORS header, read in `backend/index.js#14`
+```bash
+cd terraform
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars if needed
 
-# Optional Extras
-The core requirement for this challenge is to get the provided application up and running for consumption over the public internet. That being said, there are some opportunities in this code challenge to demonstrate your skill sets that are above and beyond the core requirement.
+terraform init
+terraform plan
+terraform apply
+```
 
-A few examples of extras for this coding challenge:
-1. Dockerizing the application
-2. Scripts to set up the infrastructure
-3. Providing a pipeline for the application deployment
-4. Running the application in a serverless environment
+Note the outputs — you'll need:
+- `frontend_ecr_url`
+- `backend_ecr_url`
+- `alb_dns_name`
+- `ecs_cluster_name`
 
-This is not an exhaustive list of extra features that could be added to this code challenge. At the end of the day, this section is for you to demonstrate any skills you want to show that’s not captured in the core requirement.
+### 4. Launch Jenkins Server
+
+**Launch EC2 manually (or use Terraform):**
+- AMI: Amazon Linux 2023 or Ubuntu 22.04
+- Instance type: `t3.medium`
+- IAM Instance Profile: `techpathway-jenkins-instance-profile` (created by Terraform)
+- Security Group: `techpathway-jenkins-sg`
+- Storage: 30 GB gp3
+
+**Bootstrap Jenkins:**
+```bash
+# SSH into the EC2 instance
+ssh -i your-key.pem ec2-user@<JENKINS_PUBLIC_IP>
+
+# Upload and run the setup script
+sudo bash jenkins-setup.sh
+```
+
+**Access Jenkins:** `http://<JENKINS_PUBLIC_IP>:8080`
+
+Get initial password:
+```bash
+sudo cat /var/lib/jenkins/secrets/initialAdminPassword
+```
+
+### 5. Configure Jenkins
+
+1. Install suggested plugins + additional:
+   - **Pipeline**
+   - **Git**
+   - **Docker Pipeline**
+   - **AWS Credentials**
+   - **Pipeline: AWS Steps**
+
+2. Create a new Pipeline job:
+   - New Item → Pipeline → Name: `techpathway-deploy`
+   - Definition: Pipeline script from SCM
+   - SCM: Git → your repo URL
+   - Branch: `*/main`
+   - Script Path: `Jenkinsfile`
+
+3. Run the pipeline — it will build, push, and deploy automatically.
+
+### 6. Place app-specific files
+
+Copy config patches into the cloned app repo:
+
+```bash
+# Frontend: replace src/config.js
+cp frontend-config.js frontend/src/config.js
+
+# Backend: replace config.js
+cp backend-config.js backend/config.js
+
+# Dockerfiles: place at root of repo
+cp docker/Dockerfile.backend ./Dockerfile.backend
+cp docker/Dockerfile.frontend ./Dockerfile.frontend
+cp docker/nginx.conf ./nginx.conf
+```
+
+---
+
+## Local Development
+
+Test the full stack locally with Docker Compose:
+
+```bash
+docker-compose up --build
+```
+
+- Frontend: http://localhost:3000
+- Backend: http://localhost:8080/health
+
+Without Docker (native):
+
+```bash
+# Terminal 1 — Backend
+cd backend && npm ci && npm start
+
+# Terminal 2 — Frontend
+cd frontend && npm ci && npm start
+```
+
+If working correctly, the frontend shows **SUCCESS** and a GUID.
+
+---
+
+## CI/CD Pipeline Stages
+
+```
+1. 🔍 Checkout        → pull latest code from GitHub
+2. 🔐 ECR Login       → authenticate Docker with ECR
+3. 🏗️ Build Images    → build frontend & backend Docker images (parallel)
+4. 🚀 Push to ECR     → push versioned + latest tags (parallel)
+5. 📝 Register Tasks  → create new ECS task definition revisions
+6. 🔄 Deploy to ECS   → force-update ECS services
+7. ⏳ Wait Stable     → wait until both services stabilise
+8. 🧪 Smoke Test      → verify frontend and backend are responding
+```
+
+The pipeline runs end-to-end without any manual steps once triggered.
+
+---
+
+## Configuration Files
+
+| File | Purpose |
+|---|---|
+| `frontend/src/config.js` | Sets `backendUrl` — reads from `REACT_APP_BACKEND_URL` env var |
+| `backend/config.js` | Sets CORS allowed origin — reads from `CORS_ORIGIN` env var |
+| `Jenkinsfile` | Full CI/CD pipeline definition |
+| `Dockerfile.backend` | Multi-stage Node.js production image |
+| `Dockerfile.frontend` | Multi-stage React build + Nginx serve |
+| `nginx.conf` | Nginx config with SPA routing and caching |
+| `terraform/` | All infrastructure-as-code |
+
+---
+
+## Environment Variables
+
+### Backend (set in ECS Task Definition)
+| Variable | Example | Description |
+|---|---|---|
+| `NODE_ENV` | `production` | Node environment |
+| `PORT` | `8080` | Port to listen on |
+| `CORS_ORIGIN` | `http://my-alb.elb.amazonaws.com` | Allowed CORS origin |
+
+### Frontend (set at Docker build time)
+| Variable | Example | Description |
+|---|---|---|
+| `REACT_APP_BACKEND_URL` | `http://my-alb.elb.amazonaws.com/api` | Backend API base URL |
+
+---
+
+## Terraform Commands Reference
+
+```bash
+cd terraform
+
+# Initialise (first time)
+terraform init
+
+# Preview changes
+terraform plan
+
+# Apply changes
+terraform apply
+
+# Destroy all infrastructure
+terraform destroy
+
+# Show outputs
+terraform output
+```
+
+---
+
+## Security Notes
+
+- ECS tasks run in **private subnets** — not directly reachable from the internet
+- All public traffic goes through the **ALB**
+- Backend is only accessible via the ALB `/api/*` rule, not directly exposed
+- Jenkins SSH access should be restricted to your IP (`0.0.0.0/0` is only for testing)
+- Terraform state should be stored in S3 with DynamoDB locking (see commented config in `provider.tf`)
+- ECR images are scanned on push for vulnerabilities
+
+---
+
+## Submission Checklist
+
+- [ ] Screenshot: deployed frontend showing SUCCESS + GUID
+- [ ] Screenshot: Jenkins pipeline showing all stages green
+- [ ] GitHub repo link (contains Terraform, Dockerfiles, Jenkinsfile)
+- [ ] Public URL: `http://<ALB_DNS>`
+- [ ] Jenkins URL: `http://<JENKINS_IP>:8080` + login details
+- [ ] Short test/deploy instructions (see Quick Start above)
