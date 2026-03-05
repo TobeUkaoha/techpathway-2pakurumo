@@ -148,62 +148,37 @@ pipeline {
         stage('📝 Register New Task Definitions') {
         // ────────────────────────────────────────────────────────
             steps {
-                script {
-                    // ── Backend Task Definition ──────────────────
-                    def backendTask = sh(
-                        script: """
-                            aws ecs describe-task-definition \
-                                --task-definition $BACKEND_TASK_FAMILY \
-                                --query 'taskDefinition' \
-                                --output json
-                        """,
-                        returnStdout: true
-                    ).trim()
+                sh '''
+                    # ── Backend Task Definition ──────────────────
+                    aws ecs describe-task-definition \
+                        --task-definition $BACKEND_TASK_FAMILY \
+                        --query taskDefinition \
+                        --output json \
+                    | jq --arg IMAGE "$BACKEND_REPO:$IMAGE_TAG" \
+                        'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy) |
+                         .containerDefinitions[0].image = $IMAGE' \
+                    > /tmp/backend-task-def.json
 
-                    def backendJson = readJSON text: backendTask
-                    backendJson.containerDefinitions[0].image = "${env.BACKEND_REPO}:${env.IMAGE_TAG}"
+                    aws ecs register-task-definition \
+                        --cli-input-json file:///tmp/backend-task-def.json \
+                        --region $AWS_REGION
+                    echo "✅ Backend task definition registered"
 
-                    // Remove fields not accepted by register-task-definition
-                    ['taskDefinitionArn','revision','status','requiresAttributes',
-                     'compatibilities','registeredAt','registeredBy'].each { key ->
-                        backendJson.remove(key)
-                    }
+                    # ── Frontend Task Definition ─────────────────
+                    aws ecs describe-task-definition \
+                        --task-definition $FRONTEND_TASK_FAMILY \
+                        --query taskDefinition \
+                        --output json \
+                    | jq --arg IMAGE "$FRONTEND_REPO:$IMAGE_TAG" \
+                        'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy) |
+                         .containerDefinitions[0].image = $IMAGE' \
+                    > /tmp/frontend-task-def.json
 
-                    writeJSON file: '/tmp/backend-task-def.json', json: backendJson
-                    sh '''
-                        aws ecs register-task-definition \
-                            --cli-input-json file:///tmp/backend-task-def.json \
-                            --region $AWS_REGION
-                        echo "✅ Backend task definition registered"
-                    '''
-
-                    // ── Frontend Task Definition ─────────────────
-                    def frontendTask = sh(
-                        script: """
-                            aws ecs describe-task-definition \
-                                --task-definition $FRONTEND_TASK_FAMILY \
-                                --query 'taskDefinition' \
-                                --output json
-                        """,
-                        returnStdout: true
-                    ).trim()
-
-                    def frontendJson = readJSON text: frontendTask
-                    frontendJson.containerDefinitions[0].image = "${env.FRONTEND_REPO}:${env.IMAGE_TAG}"
-
-                    ['taskDefinitionArn','revision','status','requiresAttributes',
-                     'compatibilities','registeredAt','registeredBy'].each { key ->
-                        frontendJson.remove(key)
-                    }
-
-                    writeJSON file: '/tmp/frontend-task-def.json', json: frontendJson
-                    sh '''
-                        aws ecs register-task-definition \
-                            --cli-input-json file:///tmp/frontend-task-def.json \
-                            --region $AWS_REGION
-                        echo "✅ Frontend task definition registered"
-                    '''
-                }
+                    aws ecs register-task-definition \
+                        --cli-input-json file:///tmp/frontend-task-def.json \
+                        --region $AWS_REGION
+                    echo "✅ Frontend task definition registered"
+                '''
             }
         }
 
